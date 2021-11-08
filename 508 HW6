@@ -1,0 +1,120 @@
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(tigris)
+library(gganimate)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+library(viridis)
+library(spatstat)
+library(FNN)
+
+options(tigris_class = "sf")
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c")
+palette4 <- c("#D2FBD4","#92BCAB","#527D82","#123F5A")
+palette2 <- c("#6baed6","#08519c")
+
+ride.ny<-read.csv("C:/Users/zheng/Desktop/508 ridership/JC-202110-citibike-tripdata.csv/JC-202110-citibike-tripdata.csv")
+ride2 <-
+  ride.ny %>% 
+  mutate(interval60 = floor_date(ymd_hms(started_at), unit = "hour"),
+         interval15 = floor_date(ymd_hms(ended_at), unit = "15 mins"),
+         week = week(interval15),
+         dotw = wday(interval60, label=TRUE),
+         Pickup.station = as.character(start_station_id),
+         Dropoff.station = as.character(end_station_id))
+
+weather.ny <- 
+  riem_measures(station = "JFK", date_start = "2021-10-01", date_end = "2021-10-31")
+weather.Panel <-  
+  weather.ny %>%
+  mutate_if(is.character, list(~replace(as.character(.), is.na(.), "0"))) %>% 
+  replace(is.na(.), 0) %>%
+  mutate(interval60 = ymd_h(substr(valid, 1, 13))) %>%
+  mutate(week = week(interval60),
+         dotw = wday(interval60, label=TRUE)) %>%
+  group_by(interval60) %>%
+  summarize(Temperature = max(tmpf),
+            Percipitation = sum(p01i),
+            Wind_Speed = max(sknt)) %>%
+  mutate(Temperature = ifelse(Temperature == 0, 42, Temperature))
+
+#Amenity features
+#subways
+subway <- st_read("https://data.cityofnewyork.us/api/geospatial/arq3-7z49?method=export&format=GeoJSON")%>%
+  dplyr::select(geometry) %>%
+  na.omit() 
+
+#schools
+school<-st_read("C:/Users/zheng/Desktop/508 ridership/Public_School_Locations/Public_Schools_Points_2011-2012A.shp")%>%
+  dplyr::select(geometry) %>%
+  na.omit() %>%
+  st_transform('EPSG:4326')
+
+#parks
+park<-st_read("https://data.cityofnewyork.us/api/geospatial/rjaj-zgq7?method=export&format=GeoJSON")%>%
+  na.omit() %>% 
+  mutate(lon = map_dbl(geometry, ~st_centroid(.x)[[1]]),
+         lat = map_dbl(geometry, ~st_centroid(.x)[[2]])) %>%
+  dplyr::select(Y = lat, X = lon,-geometry) %>%
+  na.omit() %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")
+
+park<-park%>%
+  dplyr::select(-geometry)
+
+#museum
+museum<-st_read("https://data.cityofnewyork.us/api/geospatial/ekax-ky3z?method=export&format=GeoJSON")%>%
+  dplyr::select(geometry) %>%
+  na.omit()
+
+#theaters
+theater<-st_read("https://data.cityofnewyork.us/api/geospatial/kdu2-865w?method=export&format=GeoJSON")%>%
+  dplyr::select(geometry) %>%
+  na.omit()
+
+ny_ride <- ride2 %>%
+  na.omit() %>%
+  st_as_sf(coords = c("start_lng", "start_lat"), crs = 4326, agr = "constant")
+
+st_c <- st_coordinates
+
+nn_function <- function(measureFrom,measureTo,k) {
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+  output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+
+ny_ride <-
+  ny_ride %>%
+  mutate(
+    subway.nn =
+      nn_function(st_c(ny_ride), st_c(subway),3),
+    school.nn =
+      nn_function(st_c(ny_ride), st_c(school),3),
+    musesum.nn =
+      nn_function(st_c(ny_ride), st_c(museum),3),
+    theater.nn =
+      nn_function(st_c(ny_ride), st_c(theater),3),    
+    park.nn =
+      nn_function(st_c(ny_ride), st_c(park),3))
